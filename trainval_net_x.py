@@ -5,6 +5,7 @@
 # --------------------------------------------------------
 # Domain Adaptive Faster R-CNN
 # Written by Divyam Anshumaan
+# Refined by Zongxian_lee
 # --------------------------------------------------------
 from __future__ import absolute_import
 from __future__ import division
@@ -42,6 +43,10 @@ from scipy.misc import imread
 import cv2
 from model.utils.blob import im_list_to_blob
 
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+pwd = os.getcwd()
+
+
 def parse_args():
     """
     Parse input arguments
@@ -53,11 +58,11 @@ def parse_args():
 ####################################################################################################
 # Domain Adaptation
     parser.add_argument('--da', dest='da',
-                      default=False, type=bool,
+                      default=True, type=bool,
                       help='Include domain adaptation')
 
     parser.add_argument('--adaption_lr', dest='adaption_lr',
-                      default=False, type=bool,
+                      default=True, type=bool,
                       help='modify gradient reverse')
 
     parser.add_argument('--src', dest='src_dataset',
@@ -74,7 +79,7 @@ def parse_args():
 
     parser.add_argument('--net', dest='net',
                     help='vgg16, res101',
-                    default='vgg16', type=str)
+                    default='res101', type=str)
     parser.add_argument('--start_epoch', dest='start_epoch',
                       help='starting epoch',
                       default=1, type=int)
@@ -89,14 +94,14 @@ def parse_args():
                       default=10000, type=int)
 
     parser.add_argument('--save_dir', dest='save_dir',
-                      help='directory to save models', default="/srv/share/jyang375/models",
+                      help='directory to save models', default= pwd + "/models",
                       type=str)
     parser.add_argument('--nw', dest='num_workers',
                       help='number of worker to load data',
                       default=0, type=int)
     parser.add_argument('--cuda', dest='cuda',
                       help='whether use CUDA',
-                      action='store_true')
+                      default=True, action='store_true')
     parser.add_argument('--ls', dest='large_scale',
                       help='whether use large imag scale',
                       action='store_true')
@@ -105,7 +110,7 @@ def parse_args():
                       action='store_true')
     parser.add_argument('--bs', dest='batch_size',
                       help='batch_size',
-                      default=1, type=int)
+                      default=2, type=int)
     parser.add_argument('--cag', dest='class_agnostic',
                       help='whether perform class_agnostic bbox regression',
                       action='store_true')
@@ -117,7 +122,7 @@ def parse_args():
     parser.add_argument('--lr', dest='lr',
                       help='starting learning rate',
                       default=0.001, type=float)
-		      #default=0.0001, type=float)
+
     parser.add_argument('--lr_decay_step', dest='lr_decay_step',
                       help='step to do learning rate decay, unit is epoch',
                       default=5, type=int)
@@ -279,8 +284,7 @@ if __name__ == '__main__':
     # Modify train size. Make sure both are of same size.
     # Modify training loop to continue giving src loss after tar is done.
     train_size = train_size_src
-    src_dataset = roibatchLoader(src_roidb, src_ratio_list, src_ratio_index, 1, \
-							  src_imdb.num_classes, training=True)
+    src_dataset = roibatchLoader(src_roidb, src_ratio_list, src_ratio_index, 1, src_imdb.num_classes, training=True)
 
     sampler_batch_src = sampler(train_size, args.batch_size)
     sampler_batch_tar = sampler(train_size, args.batch_size)
@@ -358,8 +362,8 @@ if __name__ == '__main__':
     elif args.net == 'res152':
         fasterRCNN = resnet(src_imdb.classes, 152, pretrained=True, class_agnostic=args.class_agnostic)
     else:
-        print("network is not defined")
-        pdb.set_trace()
+      print("network is not defined")
+      pdb.set_trace()
 
 ####################################################################################################
 
@@ -397,12 +401,8 @@ if __name__ == '__main__':
 
 # Set domain image level loss criteria
     def d_criteria(d_x, label):
-        #policy = torch.nn.NLLLoss()
-	policy = torch.nn.CrossEntropyLoss()
+        policy = torch.nn.CrossEntropyLoss()
         loss = policy(d_x, label)
-	#print(loss, 'loss before')
-        #loss = loss.sum(dim=0)
-	#print(loss, 'loss')
         return loss
 
 # Initialize consistency regularization
@@ -418,26 +418,27 @@ if __name__ == '__main__':
         args.session = checkpoint['session']
         args.start_epoch = checkpoint['epoch']
         fasterRCNN.load_state_dict(checkpoint['model'])
-	# Load domain classifiers
-	d_cls_image.load_state_dict(checkpoint['d_cls_image'])
-	d_cls_inst.load_state_dict(checkpoint['d_inst_img'])
+        d_cls_image.load_state_dict(checkpoint['d_cls_image'])
+        d_cls_inst.load_state_dict(checkpoint['d_inst_img'])
         optimizer.load_state_dict(checkpoint['optimizer'])
-	# Load domain optimizers
-	d_image_opt.load_state_dict(checkpoint['d_image_opt'])
-	d_inst_opt.load_state_dict(checkpoint['d_inst_opt'])
+        d_image_opt.load_state_dict(checkpoint['d_image_opt'])
+        d_inst_opt.load_state_dict(checkpoint['d_inst_opt'])
         lr = optimizer.param_groups[0]['lr']
         if 'pooling_mode' in checkpoint.keys():
             cfg.POOLING_MODE = checkpoint['pooling_mode']
         print("loaded checkpoint %s" % (load_name))
 
+    if args.cuda:
+      fasterRCNN.cuda()
+      d_cls_image.cuda()
+      d_cls_inst.cuda()
+
+
     if args.mGPUs:
         fasterRCNN = nn.DataParallel(fasterRCNN)
+        #d_cls_image = nn.DataParallel(d_cls_image)
+        #d_cls_inst = nn.DataParallel(d_cls_inst)
 
-    if args.cuda:
-        fasterRCNN.cuda()
-# Add domain classfiers to cuda
-        d_cls_image.cuda()
-        d_cls_inst.cuda()
 
 
     iters_per_epoch = int(train_size / args.batch_size)
@@ -449,7 +450,8 @@ if __name__ == '__main__':
     for epoch in range(args.start_epoch, args.max_epochs + 1):
         start_steps = epoch * len(src_dataloader)
         total_steps = args.max_epochs * len(src_dataloader)
-
+        frcnn_loss_tmp = 0
+        adaption_loss_tmp = 0
         is_flipped = 0
 
 # setting to train mode
@@ -459,30 +461,30 @@ if __name__ == '__main__':
         d_cls_inst.train()
 ###################################################################################################
 
-        tar_name_dir = '$YOUR_TARGET_DATASET_PATH/VOCdevkit2007/VOC2007/ImageSets/Main/test.txt'# Insert target testset path here
-        tar_img_dir = '$YOUR_TARGET_DATASET_PATH/VOCdevkit2007/VOC2007/JPEGImages'# Insert target image directory here
+        tar_name_dir = pwd + '/data/DA_Detection_SampleData/Target/VOCdevkit/VOC2007/ImageSets/Main/test.txt'# Insert target testset path here
+        tar_img_dir = pwd + '/data/DA_Detection_SampleData/Target/VOCdevkit/VOC2007/JPEGImages'# Insert target image directory here
 
         with open(tar_name_dir) as f:
             namelist = f.read().splitlines()
         imglist = os.listdir(tar_img_dir)
-        num_names = len(namelist)
+        #num_names = len(namelist)
 
-        for i in range(num_names):
-            a = namelist[i]+'.jpg'
-            imglist.remove(a)
-            print('removed', a)
+        #for i in range(num_names):
+        #    a = namelist[i]+'.jpg'
+        #    imglist.remove(a)
+        #    print('removed', a)
         num_images = len(imglist)
-
+        #print(num_images)
 ###################################################################################################
         loss_temp = 0
         start = time.time()
 
         if epoch % (args.lr_decay_step + 1) == 0:
             adjust_learning_rate(optimizer, args.lr_decay_gamma)
-	    adjust_learning_rate(d_image_opt)
-	    adjust_learning_rate(d_inst_opt)
-	    lr *= args.lr_decay_gamma
-	    print('learning rate decayed to', lr)
+            adjust_learning_rate(d_image_opt)
+            adjust_learning_rate(d_inst_opt)
+            lr *= args.lr_decay_gamma
+            print('learning rate decayed to', lr)
 
         src_data_iter = iter(src_dataloader)
 
@@ -502,7 +504,19 @@ if __name__ == '__main__':
             d_cls_image.zero_grad()
             d_cls_inst.zero_grad()
 
-            src_rois, src_cls_prob, src_bbox_pred, src_rpn_loss_cls, src_rpn_loss_box, src_RCNN_loss_cls, src_RCNN_loss_bbox, src_rois_label, src_feat_map, src_roi_pool = fasterRCNN(src_img_data, src_img_info, src_gt_boxes, src_num_boxes, is_target=False)
+            src_rois, \
+            src_cls_prob, src_bbox_pred, \
+            src_rpn_loss_cls, src_rpn_loss_box, \
+            src_RCNN_loss_cls, src_RCNN_loss_bbox,\
+            src_rois_label, src_feat_map, \
+            src_roi_pool = fasterRCNN(src_img_data, src_img_info, src_gt_boxes, src_num_boxes, is_target=False)
+
+            #faster_rcnn_loss = src_rpn_loss_cls.mean() + src_rpn_loss_box.mean() + src_RCNN_loss_cls.mean() + src_RCNN_loss_bbox.mean()
+            #frcnn_loss_tmp += faster_rcnn_loss.item()
+            #if step % args.disp_interval == 0:
+            #  if step > 0:
+            #    frcnn_loss_tmp /= (args.disp_interval + 1)
+            #  print("SRC_FasterRCNN_Loss: %.4f" % frcnn_loss_tmp)
 
 ####################################################################################################
             tar_im_counter = step%num_images
@@ -522,7 +536,7 @@ if __name__ == '__main__':
             tar_im = tar_im_in[:,:,::-1]
 
             blobs, tar_im_scales = _get_image_blob(tar_im)
-            assert len(tar_im_scales) == 1, "Only single-image batch implemented"
+            assert len(tar_im_scales) == 1, " only single image batch implemented"
             tar_im_blob = blobs
             tar_im_info_np = np.array([[tar_im_blob.shape[1], tar_im_blob.shape[2], tar_im_scales[0]]], dtype=np.float32)
 
@@ -544,6 +558,7 @@ if __name__ == '__main__':
 ###################################################################################################
             d_cls_image.set_beta(constant)
             d_cls_inst.set_beta(constant)
+
 
             src_d_img_score = d_cls_image(src_feat_map)
             src_d_inst_score = d_cls_inst(src_roi_pool)
@@ -578,8 +593,14 @@ if __name__ == '__main__':
             d_cst_loss = src_d_cst_loss + tar_d_cst_loss
 
 # Add domain loss
-            loss = src_rpn_loss_cls.mean() + src_rpn_loss_box.mean() + src_RCNN_loss_cls.mean() + src_RCNN_loss_bbox.mean() + (0.1)*(d_img_loss.mean() + d_inst_loss.mean() + d_cst_loss.mean())
-            loss_temp += loss.data[0]
+            faster_rcnn_loss = src_rpn_loss_cls.mean() + src_rpn_loss_box.mean() + src_RCNN_loss_cls.mean() + src_RCNN_loss_bbox.mean() 
+            frcnn_loss_tmp += faster_rcnn_loss.item()
+            
+            adaption_loss = d_img_loss.mean() + d_inst_loss.mean() + d_cst_loss.mean()
+            adaption_loss_tmp += adaption_loss.item()
+
+            loss = faster_rcnn_loss + (0.1)*(adaption_loss)
+            loss_temp += loss.item()
 
 # frcnn backward
             optimizer.zero_grad()
@@ -603,60 +624,55 @@ if __name__ == '__main__':
             if step % args.disp_interval == 0:
                 end = time.time()
                 if step > 0:
-                    loss_temp /= args.disp_interval
+                    loss_temp /= (args.disp_interval + 1)
+                    adaption_loss_tmp /= (args.disp_interval + 1)
+                    frcnn_loss_tmp /= (args.disp_interval +1)
                 if args.mGPUs:
-                    src_loss_rpn_cls = src_rpn_loss_cls.mean().data[0]
-                    src_loss_rpn_box = src_rpn_loss_box.mean().data[0]
-                    src_loss_rcnn_cls = src_RCNN_loss_cls.mean().data[0]
-                    src_loss_rcnn_box = src_RCNN_loss_bbox.mean().data[0]
+                    src_loss_rpn_cls = src_rpn_loss_cls.mean().item()
+                    src_loss_rpn_box = src_rpn_loss_box.mean().item()
+                    src_loss_rcnn_cls = src_RCNN_loss_cls.mean().item()
+                    src_loss_rcnn_box = src_RCNN_loss_bbox.mean().item()
                     src_fg_cnt = torch.sum(src_rois_label.data.ne(0))
                     src_bg_cnt = src_rois_label.data.numel() - src_fg_cnt
 
-                    src_loss_d_img = src_d_img_loss.mean().data[0]
-                    src_loss_d_inst = src_d_inst_loss.mean().data[0]
-                    src_loss_d_cst = src_d_cst_loss.mean().data[0]
-                    tar_loss_d_img = tar_d_img_loss.mean().data[0]
-                    tar_loss_d_inst = tar_d_inst_loss.mean().data[0]
-                    tar_loss_d_cst = tar_d_cst_loss.mean().data[0]
+                    src_loss_d_img = src_d_img_loss.mean().item()
+                    src_loss_d_inst = src_d_inst_loss.mean().item()
+                    src_loss_d_cst = src_d_cst_loss.mean().item()
+                    tar_loss_d_img = tar_d_img_loss.mean().item()
+                    tar_loss_d_inst = tar_d_inst_loss.mean().item()
+                    tar_loss_d_cst = tar_d_cst_loss.mean().item()
 
                 else:
-                    src_loss_rpn_cls = src_rpn_loss_cls.data[0]
-                    src_loss_rpn_box = src_rpn_loss_box.data[0]
-                    src_loss_rcnn_cls = src_RCNN_loss_cls.data[0]
-                    src_loss_rcnn_box = src_RCNN_loss_bbox.data[0]
+                    src_loss_rpn_cls = src_rpn_loss_cls.item()
+                    src_loss_rpn_box = src_rpn_loss_box.item()
+                    src_loss_rcnn_cls = src_RCNN_loss_cls.item()
+                    src_loss_rcnn_box = src_RCNN_loss_bbox.item()
                     src_fg_cnt = torch.sum(src_rois_label.data.ne(0))
                     src_bg_cnt = src_rois_label.data.numel() - src_fg_cnt
 
-                    src_loss_d_img = src_d_img_loss.data[0]
-                    src_loss_d_inst = src_d_inst_loss.data[0]
-                    src_loss_d_cst = src_d_cst_loss.data[0]
-                    tar_loss_d_img = tar_d_img_loss.data[0]
-                    tar_loss_d_inst = tar_d_inst_loss.data[0]
-                    tar_loss_d_cst = tar_d_cst_loss.data[0]
+                    src_loss_d_img = src_d_img_loss.item()
+                    src_loss_d_inst = src_d_inst_loss.item()
+                    src_loss_d_cst = src_d_cst_loss.item()
+                    tar_loss_d_img = tar_d_img_loss.item()
+                    tar_loss_d_inst = tar_d_inst_loss.item()
+                    tar_loss_d_cst = tar_d_cst_loss.item()
 
 ###################################################################################################
-
-                print('src_d_cst_loss', type(src_loss_d_cst), src_d_cst_loss)
-                print('tar_d_cst_loss', type(tar_loss_d_cst), tar_d_cst_loss)
+                print("src_d_cst_loss: %.4f"  % src_loss_d_cst)
+                print("tar_d_cst_loss: %.4f"  % tar_loss_d_cst)
+                print("SRC_FasterRCNN_Loss: %.4f" % frcnn_loss_tmp)
+                print("adaption_loss: %.4f" % adaption_loss_tmp)
 
                 print("[session %d][epoch %2d][iter %4d/%4d]\nloss: %.4f, lr: %.2e" \
                                       % (args.session, epoch, step, iters_per_epoch, loss_temp, lr))
                 print("\t\t\tsrc_fg/src_bg=(%d/%d), time cost: %f" % (src_fg_cnt, src_bg_cnt, end-start))
-                print("\t\t\tsrc_rpn_cls: %f,\nsrc_rpn_box: %f,\nsrc_rcnn_cls: %f,\nsrc_rcnn_box %f,\nsrc_d_img_loss: %f,\nsrc_d_inst_loss: %f,\nsrc_d_cst_loss: %f,\ntar_d_img_loss: %f,\ntar_d_inst_loss: %f,\ntar_d_cst_loss: %f\n" % (src_loss_rpn_cls, src_loss_rpn_box, src_loss_rcnn_cls, src_loss_rcnn_box, src_loss_d_img, src_loss_d_inst, src_loss_d_cst, tar_loss_d_img, tar_loss_d_inst, tar_loss_d_cst))
-
-            if args.use_tfboard:
-                info = {
-                    'loss': loss_temp,
-                    'loss_rpn_cls': loss_rpn_cls,
-                    'loss_rpn_box': loss_rpn_box,
-                    'loss_rcnn_cls': loss_rcnn_cls,
-                    'loss_rcnn_box': loss_rcnn_box
-                }
-                for tag, value in info.items():
-                    logger.scalar_summary(tag, value, step)
-
-            loss_temp = 0
-            start = time.time()
+                print("\t\t\tsrc_rpn_cls: %.4f,\nsrc_rpn_box: %.4f,\nsrc_rcnn_cls: %.4f,\nsrc_rcnn_box %.4f,\nsrc_d_img_loss: %.4f,\nsrc_d_inst_loss: %.4f,\nsrc_d_cst_loss: %.4f,\ntar_d_img_loss: %.4f,\ntar_d_inst_loss: %.4f,\ntar_d_cst_loss: %.4f\n" % (src_loss_rpn_cls, src_loss_rpn_box, src_loss_rcnn_cls, src_loss_rcnn_box, src_loss_d_img, src_loss_d_inst, src_loss_d_cst, tar_loss_d_img, tar_loss_d_inst, tar_loss_d_cst))
+                print('\n')
+                print('\n')
+                loss_temp = 0
+                frcnn_loss_tmp = 0
+                adaption_loss_tmp = 0
+                start = time.time()
 
 ####################################################################################################
 
@@ -666,13 +682,11 @@ if __name__ == '__main__':
                 'session': args.session,
                 'epoch': epoch + 1,
                 'model': fasterRCNN.module.state_dict(),
-		# Domain classifiers
-		'd_cls_image': d_cls_image.module.state_dict(),
-		'd_cls_inst': d_cls_inst.module.state_dict(),
+                'd_cls_image': d_cls_image.module.state_dict(),
+                'd_cls_inst': d_cls_inst.module.state_dict(),
                 'optimizer': optimizer.state_dict(),
-		# Domain optimizers
-		'd_image_opt': d_image_opt.state_dict(),
-		'd_inst_opt': d_inst_opt.state_dict(),
+                'd_image_opt': d_image_opt.state_dict(),
+		            'd_inst_opt': d_inst_opt.state_dict(),
                 'pooling_mode': cfg.POOLING_MODE,
                 'class_agnostic': args.class_agnostic,
             }, save_name)
@@ -682,13 +696,11 @@ if __name__ == '__main__':
                 'session': args.session,
                 'epoch': epoch + 1,
                 'model': fasterRCNN.state_dict(),
-		# Domain classifiers
-		'd_cls_image': d_cls_image.state_dict(),
-		'd_cls_inst': d_cls_inst.state_dict(),
+		            'd_cls_image': d_cls_image.state_dict(),
+                'd_cls_inst': d_cls_inst.state_dict(),
                 'optimizer': optimizer.state_dict(),
-		# Domain optimizers
-		'd_image_opt': d_image_opt.state_dict(),
-		'd_inst_opt': d_inst_opt.state_dict(),
+                'd_image_opt': d_image_opt.state_dict(),
+                'd_inst_opt': d_inst_opt.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'pooling_mode': cfg.POOLING_MODE,
                 'class_agnostic': args.class_agnostic,
